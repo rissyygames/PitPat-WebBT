@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PitPat Overlay</title>
+<style>
+  :root {
+    --text: #ffffff;
+    --label: #cfd8dc;
+    --panel: rgba(0, 0, 0, 0.55);
+  }
+  html, body { margin: 0; height: 100%; background: transparent; }
+  body.bg-green { background: #00ff00; }   /* chroma-key for OBS window capture */
+  body.bg-magenta { background: #ff00ff; }
+  body {
+    font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .overlay {
+    display: flex; gap: 28px;
+    padding: 16px 28px; border-radius: 14px;
+    background: var(--panel); color: var(--text);
+  }
+  .stat { display: flex; flex-direction: column; align-items: center; min-width: 110px; }
+  .value { font-size: 44px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .unit { font-size: 18px; font-weight: 500; margin-left: 4px; color: var(--label); }
+  .label { font-size: 14px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--label); }
+  .est { font-size: 11px; color: var(--label); height: 14px; }
+  .overlay.offline { opacity: 0.45; }
+</style>
+</head>
+<body>
+  <div class="overlay offline" id="overlay">
+    <div class="stat">
+      <div class="label">Speed</div>
+      <div><span class="value" id="speed">0.0</span><span class="unit">mph</span></div>
+      <div class="est"></div>
+    </div>
+    <div class="stat">
+      <div class="label">Distance</div>
+      <div><span class="value" id="distance">0.00</span><span class="unit">mi</span></div>
+      <div class="est"></div>
+    </div>
+    <div class="stat">
+      <div class="label">Steps</div>
+      <div><span class="value" id="steps">0</span></div>
+      <div class="est" id="stepsEst"></div>
+    </div>
+  </div>
+<script>
+  // ?bg=green or ?bg=magenta gives a solid key colour; default is transparent.
+  const bg = new URLSearchParams(location.search).get('bg');
+  if (bg === 'green' || bg === 'magenta') document.body.classList.add('bg-' + bg);
+
+  const el = id => document.getElementById(id);
+  let lastTs = 0;
+
+  function render(d) {
+    if (!d.connected) { el('overlay').classList.add('offline'); return; }
+    lastTs = d.ts || Date.now();
+    el('overlay').classList.remove('offline');
+    el('speed').textContent = d.speedMph.toFixed(1);
+    el('distance').textContent = d.distanceMi.toFixed(2);
+    el('steps').textContent = Number(d.steps).toLocaleString();
+    el('stepsEst').textContent = d.stepsEstimated ? 'estimated' : '';
+  }
+
+  try {
+    new BroadcastChannel('pitpat-overlay').onmessage = e => render(e.data);
+  } catch (e) {
+    document.body.textContent = 'This browser does not support BroadcastChannel.';
+  }
+
+  // Dim if the dashboard stops sending (tab closed, pad asleep)
+  setInterval(() => {
+    if (lastTs && Date.now() - lastTs > 5000) el('overlay').classList.add('offline');
+  }, 1000);
+</script>
+</body>
+</html>

@@ -5,6 +5,39 @@ const SERVICE_UUID = "0000fba0-0000-1000-8000-00805f9b34fb";
 const NOTIFY_CHAR_UUID = "0000fba2-0000-1000-8000-00805f9b34fb";
 const WRITE_CHAR_UUID = "0000fba1-0000-1000-8000-00805f9b34fb";
 
+// --- Units & step estimation ---
+// The pad always reports metric internally (speed in 1/1000 km/h, distance in metres).
+// We convert to imperial for display only; commands are still sent in kph units.
+const KM_TO_MI = 0.621371;
+const MPH_STEP = 0.1; // speed up/down button increment, in mph
+const DEFAULT_STRIDE_FT = 2.2; // typical walking stride; adjustable on the dashboard
+const OVERLAY_CHANNEL = 'pitpat-overlay';
+
+function kphUnitsToMph(units) { return (units / 1000) * KM_TO_MI; }
+function mphToKphUnits(mph) { return Math.round((mph / KM_TO_MI) * 1000); }
+function metresToMiles(m) { return (m / 1000) * KM_TO_MI; }
+
+function getStrideFt() {
+    const v = parseFloat(localStorage.getItem('treadmill_stride_ft'));
+    return v > 0 ? v : DEFAULT_STRIDE_FT;
+}
+function setStrideFt(ft) { localStorage.setItem('treadmill_stride_ft', String(ft)); }
+
+// Steps: use the pad's own count when it sends one; many pads report 0 here,
+// so fall back to an estimate from distance and stride length.
+function resolveSteps(rawSteps, distanceMetres) {
+    if (rawSteps > 0 && rawSteps < 1e7) return { steps: rawSteps, estimated: false };
+    const strideMetres = getStrideFt() * 0.3048;
+    return { steps: Math.round(distanceMetres / strideMetres), estimated: true };
+}
+
+// Live feed for the stream overlay (overlay.html in another window of the same browser)
+let overlayChannel = null;
+try { overlayChannel = new BroadcastChannel(OVERLAY_CHANNEL); } catch {}
+function broadcastOverlay(payload) {
+    if (overlayChannel) overlayChannel.postMessage(payload);
+}
+
 // --- UI Elements ---
 const connectBtn = document.getElementById('connectBtn');
 const statusDiv = document.getElementById('status');
@@ -61,11 +94,12 @@ function renderSessionTable() {
     historyTableBody.innerHTML = '';
     sessions.forEach((s, i) => {
         let avgSpeedDisplay = '-';
-        if (typeof s.avgSpeed === 'number' && !isNaN(s.avgSpeed)) {
-            avgSpeedDisplay = s.avgSpeed.toFixed(2) + ' ' + (s.speedUnit || '');
-        } else if (typeof s.avgSpeed === 'string' && !isNaN(parseFloat(s.avgSpeed))) {
-            avgSpeedDisplay = parseFloat(s.avgSpeed).toFixed(2) + ' ' + (s.speedUnit || '');
+        let avg = parseFloat(s.avgSpeed);
+        if (!isNaN(avg)) {
+            if (s.speedUnit === 'kph') avg *= KM_TO_MI; // older sessions were saved in kph
+            avgSpeedDisplay = avg.toFixed(1) + ' mph';
         }
+        const distDisplay = typeof s.distanceMi === 'number' ? s.distanceMi.toFixed(2) + ' mi' : '-';
         let dateStr = '-';
         if (typeof s.date === 'number' || typeof s.date === 'string') {
             dateStr = dateFns.formatRelative(new Date(s.date), new Date());
@@ -74,7 +108,8 @@ function renderSessionTable() {
         tr.innerHTML = `
             <td>${dateStr}</td>
             <td>${formatDuration(s.duration)}</td>
-            <td>${s.steps}</td>
+            <td>${distDisplay}</td>
+            <td>${Number(s.steps).toLocaleString()}</td>
             <td>${s.calories}</td>
             <td>${avgSpeedDisplay}</td>
             <td><button class="mdl-button mdl-js-button mdl-button--icon" title="Delete" onclick="window.deleteSessionFromTable(${i})"><i class="material-icons">delete</i></button></td>
@@ -268,6 +303,7 @@ function disconnectBluetooth() {
 
 function onDisconnected() {
     connected = false;
+    broadcastOverlay({ connected: false, ts: Date.now() });
     setStatus('Disconnected');
     connectBtn.textContent = "Connect";
     updateRunningState(3);
@@ -325,17 +361,31 @@ function handleNotification(event) {
     else if (running_state_bits === 16) running_state = 2;
     else running_state = 3;
     const statusArr = ["Starting", "Running", "Paused", "Stopped"];
-const speed_unit = "kph";
-const distance_unit = "km";
+    const speed_unit = "mph";
+    const speedMph = kphUnitsToMph(current_speed);
+    const distanceMi = metresToMiles(distance);
+    const stepInfo = resolveSteps(steps, distance);
     treadmillData = {
-        speed: (current_speed / 1000).toFixed(2) + " " + speed_unit,
-        distance: (distance / 1000).toFixed(2) + " " + distance_unit,
+        speed: speedMph.toFixed(1) + " " + speed_unit,
+        distance: distanceMi.toFixed(2) + " mi",
         calories: calories + " kcal",
-        steps: steps,
+        steps: stepInfo.steps.toLocaleString() + (stepInfo.estimated ? " (est.)" : ""),
         duration: Math.round(duration / 1000),
         status: statusArr[running_state] || "Unknown",
-        _raw: { current_speed, distance, calories, steps, duration, speed_unit }
+        _raw: { current_speed, distance, calories, steps, duration, unit_mode }
     };
+    updateDebugPanel(hexStr, { steps, distance, current_speed, unit_mode, estimated: stepInfo.estimated });
+    broadcastOverlay({
+        connected: true,
+        speedMph,
+        distanceMi,
+        steps: stepInfo.steps,
+        stepsEstimated: stepInfo.estimated,
+        calories,
+        durationSec: Math.round(duration / 1000),
+        status: statusArr[running_state] || "Unknown",
+        ts: Date.now()
+    });
     // Log parsed fields
     console.log("Parsed treadmill data:", treadmillData);
     updateDashboard(treadmillData);
@@ -347,7 +397,7 @@ const distance_unit = "km";
         sessionActive = true;
         sessionStartData = {
             date: Date.now(),
-            steps: steps,
+            steps: stepInfo.steps,
             calories: calories,
             distance: distance,
             duration: Math.round(duration / 1000),
@@ -356,29 +406,31 @@ const distance_unit = "km";
             speedUnit: speed_unit
         };
         // Save as first session
-        const avgSpeed = (sessionStartData.speedSum / sessionStartData.speedCount) / 1000;
+        const avgSpeed = kphUnitsToMph(sessionStartData.speedSum / sessionStartData.speedCount);
         upsertLiveSession({
             date: sessionStartData.date,
             duration: sessionStartData.duration,
             steps: sessionStartData.steps,
+            distanceMi: metresToMiles(sessionStartData.distance),
             calories: sessionStartData.calories + ' kcal',
             avgSpeed: avgSpeed,
             speedUnit: sessionStartData.speedUnit || ''
         });
     } else if (running_state === 1 && sessionActive && sessionStartData) {
         // Update session stats
-        sessionStartData.steps = steps;
+        sessionStartData.steps = stepInfo.steps;
         sessionStartData.calories = calories;
         sessionStartData.distance = distance;
         sessionStartData.duration = Math.round(duration / 1000);
         sessionStartData.speedSum += current_speed;
         sessionStartData.speedCount += 1;
         // Update first session in treadmill_sessions
-        const avgSpeed = (sessionStartData.speedSum / sessionStartData.speedCount) / 1000;
+        const avgSpeed = kphUnitsToMph(sessionStartData.speedSum / sessionStartData.speedCount);
         upsertLiveSession({
             date: sessionStartData.date,
             duration: sessionStartData.duration,
             steps: sessionStartData.steps,
+            distanceMi: metresToMiles(sessionStartData.distance),
             calories: sessionStartData.calories + ' kcal',
             avgSpeed: avgSpeed,
             speedUnit: sessionStartData.speedUnit || ''
@@ -509,13 +561,13 @@ stopBtn.addEventListener('click', () => {
 
 speedUpBtn.addEventListener('click', () => {
     if (!connected) return;
-    curTargetSpeed = Math.min(curTargetSpeed + 100, 6000);
+    curTargetSpeed = Math.min(curTargetSpeed + mphToKphUnits(MPH_STEP), 6000);
     send_data(makePacket("set_speed", curTargetSpeed));
 });
 
 speedDownBtn.addEventListener('click', () => {
     if (!connected) return;
-    curTargetSpeed = Math.max(curTargetSpeed - 1000, 1000);
+    curTargetSpeed = Math.max(curTargetSpeed - mphToKphUnits(MPH_STEP), 1000);
     send_data(makePacket("set_speed", curTargetSpeed));
 });
 
@@ -524,7 +576,7 @@ speedSlider.addEventListener('input', () => {
 });
 speedSlider.addEventListener('change', () => {
     if (!connected) return;
-    curTargetSpeed = Math.round(parseFloat(speedSlider.value) * 1000);
+    curTargetSpeed = Math.min(Math.max(mphToKphUnits(parseFloat(speedSlider.value)), 1000), 6000);
     send_data(makePacket("set_speed", curTargetSpeed));
 });
 
@@ -627,4 +679,34 @@ function showToast(message, timeout = 4000) {
     } else {
         alert(message); // fallback
     }
+}
+
+// --- Debug panel: shows raw packet bytes so we can locate the real steps field ---
+const debugHex = document.getElementById('debugHex');
+const debugInfo = document.getElementById('debugInfo');
+function updateDebugPanel(hexArr, info) {
+    if (!debugHex) return;
+    debugHex.textContent = hexArr.map((h, i) => `${String(i).padStart(2, ' ')}:${h}`).join('  ');
+    debugInfo.textContent =
+        `steps bytes 14-17 = ${info.steps}  |  distance = ${info.distance} m  |  speed raw = ${info.current_speed}` +
+        `  |  unit flag = ${info.unit_mode}  |  steps shown: ${info.estimated ? 'ESTIMATED from distance' : 'from pad'}`;
+}
+
+// --- Stride length setting ---
+const strideInput = document.getElementById('strideInput');
+if (strideInput) {
+    strideInput.value = getStrideFt();
+    strideInput.addEventListener('change', () => {
+        const v = parseFloat(strideInput.value);
+        if (v > 0.5 && v < 6) { setStrideFt(v); showToast('Stride set to ' + v + ' ft'); }
+        else { strideInput.value = getStrideFt(); }
+    });
+}
+
+// --- Open stream overlay window ---
+const overlayBtn = document.getElementById('overlayBtn');
+if (overlayBtn) {
+    overlayBtn.addEventListener('click', () => {
+        window.open('overlay.html?bg=green', 'pitpatOverlay', 'width=520,height=200');
+    });
 }
