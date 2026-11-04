@@ -10,7 +10,7 @@ const WRITE_CHAR_UUID = "0000fba1-0000-1000-8000-00805f9b34fb";
 // We convert to imperial for display only; commands are still sent in kph units.
 const KM_TO_MI = 0.621371;
 const MPH_STEP = 0.1; // speed up/down button increment, in mph
-const DEFAULT_STRIDE_FT = 2.2; // typical walking stride; adjustable on the dashboard
+const DEFAULT_STRIDE_FT = 2.64; // adjusted walking stride; adjustable on the dashboard
 const OVERLAY_CHANNEL = 'pitpat-overlay';
 
 function kphUnitsToMph(units) { return (units / 1000) * KM_TO_MI; }
