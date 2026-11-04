@@ -88,6 +88,15 @@
   #comboSteps.show { display: flex; }
   #comboSteps.bl { left: 60px; bottom: 60px; } #comboSteps.br { right: 60px; bottom: 60px; }
   #comboSteps.tl { left: 60px; top: 60px; }    #comboSteps.tr { right: 60px; top: 60px; }
+  #comboSteps.bc { left: 50%; bottom: 70px; transform: translateX(-50%); }
+  /* narrow / vertical windows: stack the bar card */
+  @media (max-width: 720px) {
+    .bar-card { grid-template-columns: 1fr; max-height: none; height: auto; gap: 10px; padding: 16px 18px; }
+    .bar-steps { border-right: 0; padding-right: 0; border-bottom: 1px solid #3a2f4d; padding-bottom: 12px; }
+    .bar-head { flex-direction: column; align-items: flex-start; gap: 6px; }
+    .bar-head .lap { text-align: left; }
+  }
+  body.vertical #bar { align-items: flex-end; padding: 16px 16px 120px; }
   .steps-card { display: flex; align-items: center; gap: 14px; background: var(--panel); border: 2px solid var(--cyan);
     border-radius: 12px; padding: 12px 20px; }
   .steps-card .num { font-size: 38px; line-height: 1; }
@@ -170,6 +179,7 @@ const GOAL_MI = parseFloat(Q.get('goal')) > 0 ? parseFloat(Q.get('goal')) : 7;
 const SIDE_MI = parseFloat(Q.get('side')) > 0 ? parseFloat(Q.get('side')) : 2.5;
 const LOOP_MI = SIDE_MI * 4;
 document.body.classList.add('layout-' + LAYOUT);
+if (Q.get('vertical')) document.body.classList.add('vertical');
 if (Q.get('bg') === 'green' || Q.get('bg') === 'magenta') document.body.classList.add('bg-' + Q.get('bg'));
 const $ = id => document.getElementById(id);
 const fmt = n => Number(n).toLocaleString();
@@ -475,17 +485,30 @@ if (LAYOUT === 'border') {
     hobbit.flip = pt.side === 2; // walking right-to-left along the bottom
     $('borderWalker').style.transform = `translate(${pt.x - hobbit.width / 2}px, ${pt.y - hobbit.height + 6}px)`;
     const tag = $('borderTag');
-    const tx = Math.min(Math.max(pt.x - tag.offsetWidth / 2, 4), W - tag.offsetWidth - 4);
-    const ty = pt.side === 0 ? pt.y + 14 : pt.y - hobbit.height - 40;
-    tag.style.left = tx + 'px'; tag.style.top = Math.max(4, ty) + 'px';
+    // tag goes on the inside of the path: below on top edge, left on right edge, etc.
+    let tx, ty;
+    if (pt.side === 1)      { tx = pt.x - hobbit.width / 2 - tag.offsetWidth - 10; ty = pt.y - hobbit.height / 2 - tag.offsetHeight / 2; }
+    else if (pt.side === 3) { tx = pt.x + hobbit.width / 2 + 10;                   ty = pt.y - hobbit.height / 2 - tag.offsetHeight / 2; }
+    else if (pt.side === 0) { tx = pt.x - tag.offsetWidth / 2; ty = pt.y + 14; }
+    else                    { tx = pt.x - tag.offsetWidth / 2; ty = pt.y - hobbit.height - tag.offsetHeight - 8; }
+    tx = Math.min(Math.max(tx, 4), W - tag.offsetWidth - 4);
+    ty = Math.min(Math.max(ty, 4), H - tag.offsetHeight - 4);
+    tag.style.left = tx + 'px'; tag.style.top = ty + 'px';
     const walked = $('walked');
-    if (walked) walked.setAttribute('stroke-dasharray', `${(shownMi % LOOP_MI) / LOOP_MI * perim} ${perim}`);
+    if (walked) {
+      // each side is SIDE_MI miles but sides differ in pixels, so measure along the real path
+      const sideLen = [W - 2 * INSET, H - 2 * INSET, W - 2 * INSET, H - 2 * INSET];
+      const m = ((shownMi % LOOP_MI) + LOOP_MI) % LOOP_MI, side = Math.min(3, Math.floor(m / SIDE_MI));
+      let px = 0; for (let i = 0; i < side; i++) px += sideLen[i];
+      px += (m - side * SIDE_MI) / SIDE_MI * sideLen[side];
+      walked.setAttribute('stroke-dasharray', `${px} ${perim}`);
+    }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
 
   const stepsPos = Q.get('steps');
-  if (['bl', 'br', 'tl', 'tr'].includes(stepsPos)) $('comboSteps').classList.add('show', stepsPos);
+  if (['bl', 'br', 'tl', 'tr', 'bc'].includes(stepsPos)) $('comboSteps').classList.add('show', stepsPos);
   render = (tot, d, j) => {
     $('comboStepsNum').textContent = fmt(tot.steps);
     $('comboStepsSub').textContent = tot.miles.toFixed(2) + ' mi this stream' + (d.stepsEstimated ? ' · est.' : '');
@@ -542,8 +565,9 @@ if (Q.get('demo')) {
     onData({ connected: true, journeyMi: jm, speedMph: 3.0, distanceMi: mi, steps: Math.round(mi * 2000), stepsEstimated: true, status: 'Running', ts: Date.now() });
   }, 250);
 } else {
-  try { new BroadcastChannel('pitpat-overlay').onmessage = e => onData(e.data); }
-  catch { document.body.textContent = 'This browser does not support BroadcastChannel.'; }
+  try { new BroadcastChannel('pitpat-overlay').onmessage = e => onData(e.data); } catch {}
+  // direct messages from the dashboard that opened this window / frame
+  addEventListener('message', e => { if (e.data && e.data.pitpat) onData(e.data.pitpat); });
 }
 </script>
 </body>

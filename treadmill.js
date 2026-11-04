@@ -51,8 +51,15 @@ function updateJourney(distanceMi) {
     if (box && document.activeElement !== box) box.value = journeyMi.toFixed(2);
 }
 
+// Overlay windows/frames opened from this page also get a direct message,
+// which works even when the files are opened from a folder (file://).
+const overlayTargets = new Set();
 function broadcastOverlay(payload) {
     if (overlayChannel) overlayChannel.postMessage(payload);
+    overlayTargets.forEach(w => {
+        if (!w || w.closed) { overlayTargets.delete(w); return; }
+        try { w.postMessage({ pitpat: payload }, '*'); } catch {}
+    });
 }
 
 // --- UI Elements ---
@@ -778,6 +785,7 @@ function enterStreamMode() {
     const exitB = dockBtn('Exit (Esc)', exitStreamMode, 'background:#555;');
     streamDock.append(pauseB, downB, speedV, upB, stopB, stats, spacer, connectB, exitB);
     document.body.append(streamFrame, streamDock);
+    overlayTargets.add(streamFrame.contentWindow);
     document.body.style.overflow = 'hidden';
 
     // keep the strip in sync with the dashboard
@@ -797,10 +805,27 @@ function enterStreamMode() {
 function exitStreamMode() {
     if (!streamFrame) return;
     clearInterval(dockTimer);
+    overlayTargets.delete(streamFrame.contentWindow);
     streamFrame.remove(); streamDock.remove(); streamFrame = streamDock = null;
     document.body.style.overflow = '';
 }
 if (streamModeBtn) streamModeBtn.addEventListener('click', enterStreamMode);
+
+// --- Vertical stream window ---
+// A separate tall window (for 9:16 vertical streams) that sits beside the
+// dashboard. It gets its data from this page, so keep the dashboard open too.
+const vertLayout = document.getElementById('vertLayout');
+const vertWindowBtn = document.getElementById('vertWindowBtn');
+try { if (vertLayout && localStorage.getItem('pitpat_vert_layout')) vertLayout.value = localStorage.getItem('pitpat_vert_layout'); } catch {}
+if (vertWindowBtn) vertWindowBtn.addEventListener('click', () => {
+    const v = vertLayout.value;
+    try { localStorage.setItem('pitpat_vert_layout', v); } catch {}
+    const layout = v === 'border-steps' ? 'border' : v;
+    const extra = v === 'border-steps' ? '&steps=bc' : '';
+    const w = window.open(`overlay.html?layout=${layout}&bg=green&vertical=1${extra}`, 'pitpat_vertical', 'width=540,height=960');
+    if (!w) showToast('Chrome blocked the pop-up: allow pop-ups for this page and try again');
+    else overlayTargets.add(w);
+});
 document.addEventListener('keydown', e => { if (e.key === 'Escape') exitStreamMode(); });
 window.addEventListener('message', e => { if (e.data === 'pitpat-exit') exitStreamMode(); });
 
