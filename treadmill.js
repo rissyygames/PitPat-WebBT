@@ -34,6 +34,22 @@ function resolveSteps(rawSteps, distanceMetres) {
 // Live feed for the stream overlay (overlay.html in another window of the same browser)
 let overlayChannel = null;
 try { overlayChannel = new BroadcastChannel(OVERLAY_CHANNEL); } catch {}
+// --- Journey total (all streams, in miles) ---
+// Adds only the distance walked while the dashboard is connected, so a pad that
+// still shows an old distance when it connects isn't counted twice.
+const JOURNEY_KEY = 'pitpat_journey_mi';
+let journeyMi = parseFloat(localStorage.getItem(JOURNEY_KEY)) || 0;
+let lastPadMi = null;
+function updateJourney(distanceMi) {
+    if (lastPadMi !== null) {
+        const d = distanceMi >= lastPadMi ? distanceMi - lastPadMi : distanceMi; // pad restarted from 0
+        if (d > 0 && d < 0.5) { journeyMi += d; localStorage.setItem(JOURNEY_KEY, journeyMi.toFixed(4)); }
+    }
+    lastPadMi = distanceMi;
+    const box = document.getElementById('journeyInput');
+    if (box && document.activeElement !== box) box.value = journeyMi.toFixed(2);
+}
+
 function broadcastOverlay(payload) {
     if (overlayChannel) overlayChannel.postMessage(payload);
 }
@@ -375,8 +391,10 @@ function handleNotification(event) {
         _raw: { current_speed, distance, calories, steps, duration, unit_mode }
     };
     updateDebugPanel(hexStr, { steps, distance, current_speed, unit_mode, estimated: stepInfo.estimated });
+    updateJourney(distanceMi);
     broadcastOverlay({
         connected: true,
+        journeyMi,
         speedMph,
         distanceMi,
         steps: stepInfo.steps,
@@ -704,9 +722,68 @@ if (strideInput) {
 }
 
 // --- Open stream overlay window ---
-const overlayBtn = document.getElementById('overlayBtn');
-if (overlayBtn) {
-    overlayBtn.addEventListener('click', () => {
-        window.open('overlay.html?bg=green', 'pitpatOverlay', 'width=520,height=200');
+// --- Stream Mode ---
+// Shows the overlay full-window, on green, inside THIS page, so the pad
+// connection and the overlay live in one Chrome window for OBS Window Capture.
+// Press Esc (or the small "Exit" button that appears in the top-left corner
+// when you hover there) to get the dashboard back.
+const streamLayout = document.getElementById('streamLayout');
+const streamStepsPos = document.getElementById('streamStepsPos');
+const streamModeBtn = document.getElementById('streamModeBtn');
+try {
+    if (streamLayout && localStorage.getItem('pitpat_stream_layout')) streamLayout.value = localStorage.getItem('pitpat_stream_layout');
+    if (streamStepsPos && localStorage.getItem('pitpat_stream_steps_pos')) streamStepsPos.value = localStorage.getItem('pitpat_stream_steps_pos');
+} catch {}
+function syncStepsPos() { if (streamStepsPos) streamStepsPos.style.display = streamLayout.value === 'border-steps' ? '' : 'none'; }
+if (streamLayout) { streamLayout.addEventListener('change', syncStepsPos); syncStepsPos(); }
+
+let streamFrame = null, streamExit = null;
+function enterStreamMode() {
+    if (streamFrame) return;
+    const v = streamLayout ? streamLayout.value : 'bar';
+    try { localStorage.setItem('pitpat_stream_layout', v); localStorage.setItem('pitpat_stream_steps_pos', streamStepsPos.value); } catch {}
+    const layout = v === 'border-steps' ? 'border' : v;
+    const extra = v === 'border-steps' ? '&steps=' + streamStepsPos.value : '';
+    streamFrame = document.createElement('iframe');
+    streamFrame.src = `overlay.html?layout=${layout}&bg=green${extra}`;
+    streamFrame.style.cssText = 'position:fixed;inset:0;width:100vw;height:100vh;border:0;z-index:99998;background:#00ff00;';
+    streamExit = document.createElement('button');
+    streamExit.textContent = 'Exit stream mode (Esc)';
+    streamExit.style.cssText = 'position:fixed;left:0;top:0;z-index:99999;padding:6px 10px;font:12px sans-serif;' +
+        'background:#222;color:#fff;border:0;opacity:0;transition:opacity .2s;cursor:pointer;';
+    streamExit.onmouseenter = () => streamExit.style.opacity = '1';
+    streamExit.onmouseleave = () => streamExit.style.opacity = '0';
+    streamExit.onclick = exitStreamMode;
+    document.body.append(streamFrame, streamExit);
+    document.body.style.overflow = 'hidden';
+}
+function exitStreamMode() {
+    if (!streamFrame) return;
+    streamFrame.remove(); streamExit.remove(); streamFrame = streamExit = null;
+    document.body.style.overflow = '';
+}
+if (streamModeBtn) streamModeBtn.addEventListener('click', enterStreamMode);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') exitStreamMode(); });
+window.addEventListener('message', e => { if (e.data === 'pitpat-exit') exitStreamMode(); });
+
+// Stream totals (miles/steps across pad stops and starts) live in the overlay;
+// press this at the start of each stream.
+// Journey miles box: shows the running total, and lets you correct it
+// (for example when streaming from a different computer or browser).
+const journeyInput = document.getElementById('journeyInput');
+if (journeyInput) {
+    journeyInput.value = journeyMi.toFixed(2);
+    journeyInput.addEventListener('change', () => {
+        const v = parseFloat(journeyInput.value);
+        if (v >= 0 && v < 100000) { journeyMi = v; localStorage.setItem(JOURNEY_KEY, v.toFixed(4)); showToast('Journey set to ' + v.toFixed(2) + ' mi'); }
+        else journeyInput.value = journeyMi.toFixed(2);
     });
 }
+
+const resetStreamBtn = document.getElementById('resetStreamBtn');
+if (resetStreamBtn) resetStreamBtn.addEventListener('click', () => {
+    if (!confirm('Reset this stream\'s miles and steps on the overlay to 0?')) return;
+    broadcastOverlay({ type: 'reset' });
+    try { localStorage.removeItem('pitpat_stream_totals'); } catch {}
+    showToast('Stream totals reset');
+});
