@@ -10,6 +10,7 @@ const WRITE_CHAR_UUID = "0000fba1-0000-1000-8000-00805f9b34fb";
 // We convert to imperial for display only; commands are still sent in kph units.
 const KM_TO_MI = 0.621371;
 const MPH_STEP = 0.1; // speed up/down button increment, in mph
+const MAX_MPH = 3.5;  // top speed allowed from the dashboard (Donni's limit)
 const DEFAULT_STRIDE_FT = 2.64; // adjusted walking stride; adjustable on the dashboard
 const OVERLAY_CHANNEL = 'pitpat-overlay';
 
@@ -579,7 +580,7 @@ stopBtn.addEventListener('click', () => {
 
 speedUpBtn.addEventListener('click', () => {
     if (!connected) return;
-    curTargetSpeed = Math.min(curTargetSpeed + mphToKphUnits(MPH_STEP), 6000);
+    curTargetSpeed = Math.min(curTargetSpeed + mphToKphUnits(MPH_STEP), mphToKphUnits(MAX_MPH));
     send_data(makePacket("set_speed", curTargetSpeed));
 });
 
@@ -594,7 +595,7 @@ speedSlider.addEventListener('input', () => {
 });
 speedSlider.addEventListener('change', () => {
     if (!connected) return;
-    curTargetSpeed = Math.min(Math.max(mphToKphUnits(parseFloat(speedSlider.value)), 1000), 6000);
+    curTargetSpeed = Math.min(Math.max(mphToKphUnits(parseFloat(speedSlider.value)), 1000), mphToKphUnits(MAX_MPH));
     send_data(makePacket("set_speed", curTargetSpeed));
 });
 
@@ -737,7 +738,19 @@ try {
 function syncStepsPos() { if (streamStepsPos) streamStepsPos.style.display = streamLayout.value === 'border-steps' ? '' : 'none'; }
 if (streamLayout) { streamLayout.addEventListener('change', syncStepsPos); syncStepsPos(); }
 
-let streamFrame = null, streamExit = null;
+// The overlay fills the top of the window; a control strip sits along the bottom
+// so Donni can pause/resume and change speed mid-stream. Crop the strip off in
+// OBS (hold Alt and drag the bottom edge of the Window Capture source).
+const DOCK_H = 76;
+let streamFrame = null, streamDock = null, dockTimer = null;
+function dockBtn(label, onClick, extra = '') {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'font:600 15px system-ui,sans-serif;padding:10px 16px;border:0;border-radius:8px;cursor:pointer;' +
+        'background:#3a2f4d;color:#fff;' + extra;
+    b.onclick = onClick;
+    return b;
+}
 function enterStreamMode() {
     if (streamFrame) return;
     const v = streamLayout ? streamLayout.value : 'bar';
@@ -746,20 +759,45 @@ function enterStreamMode() {
     const extra = v === 'border-steps' ? '&steps=' + streamStepsPos.value : '';
     streamFrame = document.createElement('iframe');
     streamFrame.src = `overlay.html?layout=${layout}&bg=green${extra}`;
-    streamFrame.style.cssText = 'position:fixed;inset:0;width:100vw;height:100vh;border:0;z-index:99998;background:#00ff00;';
-    streamExit = document.createElement('button');
-    streamExit.textContent = 'Exit stream mode (Esc)';
-    streamExit.style.cssText = 'position:fixed;left:0;top:0;z-index:99999;padding:6px 10px;font:12px sans-serif;' +
-        'background:#222;color:#fff;border:0;opacity:0;transition:opacity .2s;cursor:pointer;';
-    streamExit.onmouseenter = () => streamExit.style.opacity = '1';
-    streamExit.onmouseleave = () => streamExit.style.opacity = '0';
-    streamExit.onclick = exitStreamMode;
-    document.body.append(streamFrame, streamExit);
+    streamFrame.style.cssText = `position:fixed;left:0;top:0;width:100vw;height:calc(100vh - ${DOCK_H}px);border:0;z-index:99998;background:#00ff00;`;
+
+    streamDock = document.createElement('div');
+    streamDock.style.cssText = `position:fixed;left:0;right:0;bottom:0;height:${DOCK_H}px;z-index:99999;background:#120d1a;` +
+        'color:#fff;display:flex;align-items:center;gap:10px;padding:0 14px;box-sizing:border-box;font:14px system-ui,sans-serif;' +
+        'border-top:2px solid #9b6dd6;overflow-x:auto;';
+    const pauseB = dockBtn('Pause', () => startBtn.click(), 'min-width:96px;background:#2e7d32;');
+    const downB = dockBtn('− Speed', () => speedDownBtn.click());
+    const speedV = document.createElement('div');
+    speedV.style.cssText = 'font:800 26px system-ui,sans-serif;min-width:110px;text-align:center;font-variant-numeric:tabular-nums;';
+    const upB = dockBtn('+ Speed', () => speedUpBtn.click());
+    const stopB = dockBtn('Stop', () => { if (confirm('Stop the walking pad? (Miles so far are kept for this stream.)')) stopBtn.click(); }, 'background:#8e2b2b;');
+    const stats = document.createElement('div');
+    stats.style.cssText = 'margin-left:8px;line-height:1.5;color:#cfc4df;white-space:nowrap;';
+    const spacer = document.createElement('div'); spacer.style.flex = '1';
+    const connectB = dockBtn('Connect pad', () => connectBtn.click(), 'background:#1565c0;');
+    const exitB = dockBtn('Exit (Esc)', exitStreamMode, 'background:#555;');
+    streamDock.append(pauseB, downB, speedV, upB, stopB, stats, spacer, connectB, exitB);
+    document.body.append(streamFrame, streamDock);
     document.body.style.overflow = 'hidden';
+
+    // keep the strip in sync with the dashboard
+    const sync = () => {
+        pauseB.textContent = startBtn.textContent === 'Pause' ? 'Pause' : 'Start';
+        pauseB.style.background = pauseB.textContent === 'Pause' ? '#b26a00' : '#2e7d32';
+        [pauseB, downB, upB, stopB].forEach(b => { const src = b === pauseB ? startBtn : b === downB ? speedDownBtn : b === upB ? speedUpBtn : stopBtn;
+            b.disabled = src.disabled; b.style.opacity = src.disabled ? '0.4' : '1'; });
+        speedV.textContent = speedDiv.textContent;
+        const st = !connected ? 'Not connected' : (['Starting', 'Running', 'Paused', 'Stopped'][runningState] || '');
+        stats.innerHTML = `<b>${st}</b> · ${distanceDiv.textContent} · ${stepsDiv.textContent} steps<br>` +
+            `Time ${durationDiv.textContent} · Max ${MAX_MPH} mph`;
+        connectB.style.display = connected ? 'none' : '';
+    };
+    sync(); dockTimer = setInterval(sync, 300);
 }
 function exitStreamMode() {
     if (!streamFrame) return;
-    streamFrame.remove(); streamExit.remove(); streamFrame = streamExit = null;
+    clearInterval(dockTimer);
+    streamFrame.remove(); streamDock.remove(); streamFrame = streamDock = null;
     document.body.style.overflow = '';
 }
 if (streamModeBtn) streamModeBtn.addEventListener('click', enterStreamMode);
